@@ -20,3 +20,9 @@ __pycache__/
 
 .DS_Store
 .vscode/
+
+*.dbf
+*.zip
+auxiliary/
+
+notebooks/

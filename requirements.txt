@@ -16,7 +16,7 @@ fiona
 earthaccess
 python-dotenv
 
-# Visualization (for your notebooks/visualize.py)
+# Visualization 
 matplotlib
 seaborn
 
