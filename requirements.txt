@@ -1,0 +1,24 @@
+
+# Data Processing
+numpy
+pandas
+xarray
+h5netcdf
+scipy
+
+# Geospatial
+geopandas
+shapely
+pyproj
+fiona
+
+# NASA Data Access
+earthaccess
+python-dotenv
+
+# Visualization (for your notebooks/visualize.py)
+matplotlib
+seaborn
+
+# Utility
+tqdm
