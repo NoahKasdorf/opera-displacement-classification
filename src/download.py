@@ -6,6 +6,23 @@ import argparse
 
 from config import PROJECT_ROOT, REGIONS
 
+TARGET_FRAMES = {
+    "washington": "16950",
+    "hayward": "09156",
+    "oregon_coast": "03323",
+    "san_andreas": "09155",
+    "san_joaquin": "11116",
+    "houston": "38238",
+    "california_north": "09158",
+    "wasatch": "05131",
+    "phoenix": "05126",
+    "st_helens": "03322",
+    
+    "stable_kansas": "08889",
+    "stable_texas": "28482",
+    "stable_sierra": "16942",
+}
+
 
 def download_region(region_name, max_files=100):
     """Downloads up to max_files OPERA DISP-S1 granules for a given region.
@@ -15,6 +32,7 @@ def download_region(region_name, max_files=100):
         max_files (int, optional): Maximum number of granules to fetch. Defaults to 100.
     """
     info = REGIONS.get(region_name)
+    frame_id = TARGET_FRAMES.get(region_name)
     if not info:
         print(f"Error: Region '{region_name}' not found.")
         return
@@ -27,14 +45,19 @@ def download_region(region_name, max_files=100):
     out_dir = PROJECT_ROOT / "data" / region_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"Targeting {region_name} | Frame: {frame_id} | Goal: {max_files} files")
+
     bbox = info["bbox"]
     print(f"Searching OPERA DISP-S1 for {region_name} | bbox={bbox}")
 
     results = earthaccess.search_data(
         short_name="OPERA_L3_DISP-S1_V1",
         bounding_box=bbox,
+        granule_name= f"*_F{frame_id}_*",
         temporal=("2016-07-01", "2026-03-17"),
+        #temporal=("2022-01-01", "2026-06-01"),
         count=max_files,
+        sort_key="-start_date",
     )
     print(f"Found {len(results)} granules.")
 

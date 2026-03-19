@@ -20,10 +20,24 @@ REGIONS = {
         "shapefile_filter": {"column": "fault_name", "contains": "Hayward"},
         "buffer_m": 2000,
     },
+    "wasatch": {
+        "label": "tectonic",
+        "bbox": (-112.1, 40.5, -111.7, 41.0),
+        "shapefile": "auxiliary/faults/Qfaults_US_Database.shp",
+        "shapefile_filter": {"column": "fault_name", "contains": "Wasatch"},
+        "buffer_m": 2000,
+    },
     # --- Landslide ---
     "oregon_coast": {
         "label": "landslide",
         "bbox": (-124.2, 43.5, -123.5, 44.5),
+        "shapefile": "auxiliary/landslides/us_ls_v3_point.shp",
+        "shapefile_filter": None,
+        "buffer_m": 500,
+    },
+    "california_north": {
+        "label": "landslide",
+        "bbox": (-124.5, 40.0, -123.5, 41.5),
         "shapefile": "auxiliary/landslides/us_ls_v3_point.shp",
         "shapefile_filter": None,
         "buffer_m": 500,
@@ -38,7 +52,8 @@ REGIONS = {
     # --- Subsidence ---
     "san_joaquin": {
         "label": "subsidence",
-        "bbox": (-120.8, 35.5, -119.5, 36.5),
+        # "bbox": (-120.8, 35.5, -119.5, 36.5),
+        "bbox": (-120.3, 35.5, -119.5, 36.5),
         "shapefile": None,
         "shapefile_filter": None,
         "buffer_m": None,
@@ -50,25 +65,40 @@ REGIONS = {
         "shapefile_filter": None,
         "buffer_m": None,
     },
+    "phoenix": {
+        "label": "subsidence",
+        "bbox": (-112.3, 33.2, -111.6, 33.7),
+        "shapefile": None,
+        "shapefile_filter": None,
+        "buffer_m": None,
+    },
     # --- Volcanic ---
-    "long_valley": {
-        "label": "volcanic",
-        "bbox": (-119.2, 37.5, -118.5, 37.9),
-        "shapefile": None,
-        "shapefile_filter": None,
-        "buffer_m": None,
-    },
-    "yellowstone": {
-        "label": "volcanic",
-        "bbox": (-111.0, 44.3, -110.2, 44.8),
-        "shapefile": None,
-        "shapefile_filter": None,
-        "buffer_m": None,
-    },
+    # "long_valley": {
+    #     "label": "volcanic",
+    #     "bbox": (-119.2, 37.5, -118.5, 37.9),
+    #     "shapefile": None,
+    #     "shapefile_filter": None,
+    #     "buffer_m": None,
+    # },
+    # "yellowstone": {
+    #     "label": "volcanic",
+    #     "bbox": (-111.0, 44.3, -110.2, 44.8),
+    #     "shapefile": None,
+    #     "shapefile_filter": None,
+    #     "buffer_m": None,
+    # },
+    # "st_helens": {
+    #     "label": "volcanic",
+    #     "bbox": (-122.5, 46.0, -121.8, 46.4),
+    #     "shapefile": None,
+    #     "shapefile_filter": None,
+    #     "buffer_m": None,
+    # },
     # --- Stable ---
     "stable_sierra": {
         "label": "stable",
-        "bbox": (-119.5, 37.0, -118.8, 37.5),
+        # "bbox": (-119.5, 37.0, -118.8, 37.5),
+        "bbox": (-119.5, 37.0, -118.8, 37.4),
         "shapefile": None,
         "shapefile_filter": None,
         "buffer_m": None,
@@ -76,6 +106,13 @@ REGIONS = {
     "stable_texas": {
         "label": "stable",
         "bbox": (-98.0, 30.0, -97.2, 30.5),
+        "shapefile": None,
+        "shapefile_filter": None,
+        "buffer_m": None,
+    },
+    "stable_kansas": {
+        "label": "stable",
+        "bbox": (-97.5, 38.5, -96.8, 39.0),
         "shapefile": None,
         "shapefile_filter": None,
         "buffer_m": None,
