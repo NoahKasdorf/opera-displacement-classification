@@ -132,6 +132,7 @@ def load_frame_datasets(file_list):
 
     dates = [r["acq"] for r in ref_info]
     ref_dates = [r["ref"] for r in ref_info]
+    paths = [r["path"] for r in ref_info]
     datasets = [xr.open_dataset(r["path"], engine="h5netcdf") for r in ref_info]
 
     REQUIRED_VARS = {
@@ -160,7 +161,7 @@ def load_frame_datasets(file_list):
         print(f"    {ref[:19]}: {ref_counts[ref]} files")
     print(f"  Grid shape: {datasets[0]['short_wavelength_displacement'].shape}")
 
-    return dates, datasets, ref_dates
+    return dates, datasets, ref_dates, paths
 
 
 def get_opera_crs(ds):
@@ -213,22 +214,30 @@ def get_bbox_slices(ds, bbox):
     return row_slice, col_slice
 
 
-def get_quality_mask(ds, row_slice=None, col_slice=None):
+def get_quality_mask(ds, row_slice=None, col_slice=None, coherence_override=None):
     """Generates a boolean mask from recommended_mask and temporal coherence.
 
     The recommended_mask already excludes water pixels, disconnected components,
     and pixels with low coherence + low phase similarity. We add a coherence > 0.5
     threshold on top for additional filtering.
 
+    Args:
+        coherence_override: Pre-computed coherence array (e.g., averaged over
+            multiple acquisitions). If provided, skips reading from ds.
+
     Returns:
         tuple: (good_mask, coherence) — boolean array and raw coherence values.
     """
     rec = ds["recommended_mask"].values.squeeze()
-    coherence = ds["temporal_coherence"].values.squeeze()
-
     if row_slice and col_slice:
         rec = rec[row_slice, col_slice]
-        coherence = coherence[row_slice, col_slice]
+
+    if coherence_override is not None:
+        coherence = coherence_override
+    else:
+        coherence = ds["temporal_coherence"].values.squeeze()
+        if row_slice and col_slice:
+            coherence = coherence[row_slice, col_slice]
 
     good = (rec == 1) & (coherence > 0.5)
     print(
@@ -346,7 +355,12 @@ def filter_by_rate(y_coords, x_coords, cube, t_days, mode, threshold_mm_yr):
     """Keeps pixels whose linear displacement rate passes a threshold.
 
     Uses vectorized least-squares regression across all pixels simultaneously.
-    Mode 'stable' keeps |rate| <= threshold; 'subsidence' keeps rate <= -threshold.
+
+    Modes:
+      'stable'     — keeps |rate| <= threshold (quiet ground)
+      'subsidence' — keeps rate <= -threshold (downward motion)
+      'tectonic'   — keeps |rate| >= threshold (active fault creep)
+      'landslide'  — keeps |rate| >= threshold (active slope motion)
 
     Returns:
         tuple: Filtered (y_coords, x_coords).
@@ -373,8 +387,12 @@ def filter_by_rate(y_coords, x_coords, cube, t_days, mode, threshold_mm_yr):
 
     if mode == "stable":
         keep_mask = has_data & (np.abs(rate_mm_yr) <= threshold_mm_yr)
-    else:
+    elif mode == "subsidence":
         keep_mask = has_data & (rate_mm_yr <= -threshold_mm_yr)
+    else:
+        # tectonic / landslide: require a minimum absolute rate to confirm
+        # the pixel is actively deforming, not just near a geographic feature
+        keep_mask = has_data & (np.abs(rate_mm_yr) >= threshold_mm_yr)
 
     kept_y = y_coords[keep_mask]
     kept_x = x_coords[keep_mask]
@@ -385,7 +403,31 @@ def filter_by_rate(y_coords, x_coords, cube, t_days, mode, threshold_mm_yr):
     return kept_y, kept_x
 
 
-def build_displacement_cube(datasets, dates, ref_dates, row_slice=None, col_slice=None):
+def _read_displacement_slice(path, row_slice=None, col_slice=None):
+    """Opens one OPERA .nc file with h5py and reads only the spatial sub-region.
+
+    h5py performs a true HDF5 hyperslab read — only the requested bytes are
+    fetched from disk. This avoids loading the full ~291 MB frame when we only
+    need a small bbox crop.
+
+    Returns a 2D float32 array of shape (bbox_rows, bbox_cols).
+    """
+    with h5py.File(path, "r") as hf:
+        var = hf["short_wavelength_displacement"]
+        if row_slice is not None and col_slice is not None:
+            if var.ndim == 3:
+                frame = var[0, row_slice, col_slice]
+            else:
+                frame = var[row_slice, col_slice]
+        else:
+            if var.ndim == 3:
+                frame = var[0, ...]
+            else:
+                frame = var[...]
+    return frame.astype(np.float32)
+
+
+def build_displacement_cube(file_paths, dates, ref_dates, row_slice=None, col_slice=None):
     """Builds a stitched 3D displacement cube from short_wavelength_displacement.
 
     OPERA changes the reference epoch roughly every 15 acquisitions. This function
@@ -398,24 +440,21 @@ def build_displacement_cube(datasets, dates, ref_dates, row_slice=None, col_slic
       - If no overlap: boundary stitch using last/first dates (~12-day gap error).
       - Pixels with NaN at the boundary get the spatial median offset as fallback.
 
+    Each file is opened, sliced, and closed immediately — only the bbox crop is
+    held in memory at a time, not the full ~291 MB frame.
+
     Returns:
         numpy.ndarray: Stitched cube of shape (T, H, W) in float64.
     """
-    if row_slice and col_slice:
-        raw = np.array(
-            [
-                ds["short_wavelength_displacement"].values.squeeze()[
-                    row_slice, col_slice
-                ]
-                for ds in datasets
-            ],
-            dtype=np.float32,
-        )
-    else:
-        raw = np.array(
-            [ds["short_wavelength_displacement"].values.squeeze() for ds in datasets],
-            dtype=np.float32,
-        )
+    # Read first file to determine output shape, then pre-allocate the cube.
+    sample = _read_displacement_slice(file_paths[0], row_slice, col_slice)
+    T = len(file_paths)
+    H, W = sample.shape
+    raw = np.empty((T, H, W), dtype=np.float32)
+    raw[0] = sample
+
+    for i, path in enumerate(file_paths[1:], start=1):
+        raw[i] = _read_displacement_slice(path, row_slice, col_slice)
 
     # Identify segment boundaries
     segments = []
@@ -495,39 +534,56 @@ def extract_time_series(cube, y_coords, x_coords, dates, max_nan_frac=0.2):
     valid = []
     skipped = 0
 
+    doy = np.array([d.timetuple().tm_yday for d in dates])
+
     for i in range(len(y_coords)):
         y, x = int(y_coords[i]), int(x_coords[i])
-        ts = cube[:, y, x].copy()
+        ts_raw = cube[:, y, x].copy()
+        num_valid = int(np.sum(~np.isnan(ts_raw)))
 
-        if np.sum(np.isnan(ts)) / T > max_nan_frac:
+        if np.sum(np.isnan(ts_raw)) / T > max_nan_frac:
             skipped += 1
             continue
 
+        ts = ts_raw.copy()
         if np.any(np.isnan(ts)):
             good = ~np.isnan(ts)
             ts = np.interp(t_days, t_days[good], ts[good])
 
-        valid.append({"y": y, "x": x, "time_series": ts, "t_days": t_days})
+        valid.append({
+            "y": y, "x": x,
+            "time_series": ts,
+            "t_days": t_days,
+            "doy": doy,
+            "num_valid_obs": num_valid,
+        })
 
     print(f"  Valid: {len(valid)}, Skipped: {skipped}")
     return valid
 
 
-def compute_temporal_features(d, t):
+def compute_temporal_features(d, t, doy=None, num_valid_obs=None):
     """Computes temporal features from a single displacement time series.
 
-    Features (all in mm or mm/yr):
-      - linear_rate_mm_yr: slope of linear fit
-      - r_squared_linear: goodness of linear fit
-      - total_disp_mm: end-to-end displacement
-      - max_abs_disp_mm: peak absolute displacement
-      - acceleration: quadratic coefficient (m/day^2)
-      - r2_ratio_quad_lin: ratio of quadratic to linear R^2 (capped at 10)
-      - seasonal_amp_mm: amplitude of annual sinusoidal component
-      - residual_std_mm: scatter around the linear fit
-      - autocorr_lag1: lag-1 autocorrelation
-      - vel_sign_changes: direction reversals in velocity
-      - vel_kurtosis, vel_skewness: velocity distribution shape
+    Features (all in mm or mm/yr unless noted):
+      linear_rate_mm_yr       — slope of linear fit
+      r_squared_linear        — goodness of linear fit
+      max_abs_disp_mm         — peak absolute displacement
+      disp_monotonicity       — max_abs / |end-to-end| ratio; high = steady trend,
+                                low = oscillatory or peaked signal
+      acceleration            — quadratic coefficient (m/day²)
+      r2_ratio_quad_lin       — ratio of quadratic to linear R² (capped at 10)
+      seasonal_amp_mm         — amplitude of annual sinusoidal component
+      seasonal_phase_days     — day-of-year at which annual cycle peaks
+      residual_std_mm         — scatter around the linear fit
+      autocorr_lag1           — lag-1 autocorrelation
+      vel_sign_changes        — direction reversals in incremental velocity
+      vel_kurtosis            — kurtosis of velocity distribution
+      vel_skewness            — skewness of velocity distribution
+      vel_cv                  — coefficient of variation of velocity (episodicity)
+      max_window_rate_mm_yr   — max |rate| over any 5-timestep rolling window
+      inter_seasonal_rate_contrast — |summer_rate − winter_rate| (mm/yr)
+      num_valid_obs           — non-interpolated observation count
 
     Returns:
         dict or None if fewer than 10 data points.
@@ -537,33 +593,52 @@ def compute_temporal_features(d, t):
 
     f = {}
 
+    # --- Linear fit ---
     lr = stats.linregress(t, d)
     f["linear_rate_mm_yr"] = lr.slope * 365.25 * 1000
-    f["r_squared_linear"] = lr.rvalue**2
-    f["total_disp_mm"] = (d[-1] - d[0]) * 1000
-    f["max_abs_disp_mm"] = np.max(np.abs(d)) * 1000
+    f["r_squared_linear"] = lr.rvalue ** 2
 
+    # --- Displacement magnitude ---
+    total_disp = d[-1] - d[0]
+    max_abs = np.max(np.abs(d))
+    f["max_abs_disp_mm"] = float(max_abs * 1000)
+    # Monotonicity ratio: high for steady directional trends (tectonic, subsidence),
+    # low for oscillatory or episodic signals (landslide, noise)
+    f["disp_monotonicity"] = float(min(max_abs / (abs(total_disp) + 1e-6), 20.0))
+
+    # --- Quadratic fit ---
     coeffs = np.polyfit(t, d, 2)
-    f["acceleration"] = coeffs[0]
+    f["acceleration"] = float(coeffs[0])
     quad_pred = np.polyval(coeffs, t)
     ss_res = np.sum((d - quad_pred) ** 2)
     ss_tot = np.sum((d - np.mean(d)) ** 2)
-    r2_quad = 1 - ss_res / ss_tot if ss_tot > 0 else 0
-    f["r2_ratio_quad_lin"] = min(r2_quad / (lr.rvalue**2 + 1e-10), 10.0)
+    r2_quad = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    f["r2_ratio_quad_lin"] = float(min(r2_quad / (lr.rvalue ** 2 + 1e-10), 10.0))
 
+    # --- Seasonal component ---
     omega = 2 * np.pi / 365.25
     A = np.column_stack([t, np.ones_like(t), np.cos(omega * t), np.sin(omega * t)])
     try:
         coefs = np.linalg.lstsq(A, d, rcond=None)[0]
-        f["seasonal_amp_mm"] = np.sqrt(coefs[2] ** 2 + coefs[3] ** 2) * 1000
+        amp = np.sqrt(coefs[2] ** 2 + coefs[3] ** 2)
+        f["seasonal_amp_mm"] = float(amp * 1000)
+        # Phase: day-of-year at which the annual cycle reaches its peak
+        phase_rad = np.arctan2(coefs[3], coefs[2])
+        f["seasonal_phase_days"] = float((phase_rad / omega) % 365.25)
     except np.linalg.LinAlgError:
         f["seasonal_amp_mm"] = 0.0
+        f["seasonal_phase_days"] = 0.0
 
+    # --- Residuals & autocorrelation ---
     residuals = d - (lr.slope * t + lr.intercept)
-    f["residual_std_mm"] = np.std(residuals) * 1000
+    f["residual_std_mm"] = float(np.std(residuals) * 1000)
     f["autocorr_lag1"] = float(np.corrcoef(d[:-1], d[1:])[0, 1]) if len(d) > 2 else 0.0
 
+    # --- Velocity-based features ---
     vel = np.diff(d)
+    dt = np.diff(t)
+    vel_rate = vel / np.maximum(dt, 1.0) * 365.25 * 1000  # mm/yr per step
+
     f["vel_sign_changes"] = int(np.sum(np.diff(np.sign(vel)) != 0))
     if len(vel) > 3:
         f["vel_kurtosis"] = float(stats.kurtosis(vel))
@@ -571,6 +646,38 @@ def compute_temporal_features(d, t):
     else:
         f["vel_kurtosis"] = 0.0
         f["vel_skewness"] = 0.0
+
+    # Coefficient of variation: high for episodic/bursty motion (landslide),
+    # low for steady creep (tectonic) or uniform subsidence
+    mean_abs_vel = float(np.mean(np.abs(vel_rate)))
+    f["vel_cv"] = float(np.std(vel_rate) / (mean_abs_vel + 1e-6))
+
+    # Max short-window rate: captures peak slip events that a linear fit misses
+    window = min(5, len(vel_rate))
+    if len(vel_rate) >= window:
+        f["max_window_rate_mm_yr"] = float(
+            max(abs(np.mean(vel_rate[i : i + window]))
+                for i in range(len(vel_rate) - window + 1))
+        )
+    else:
+        f["max_window_rate_mm_yr"] = mean_abs_vel
+
+    # Inter-seasonal rate contrast: landslides accelerate in wet seasons;
+    # subsidence is temporally uniform; tectonic creep is nearly constant
+    if doy is not None and len(doy) == len(d):
+        summer = (doy >= 150) & (doy <= 250)
+        winter = (doy >= 275) | (doy <= 90)
+        if summer.sum() >= 3 and winter.sum() >= 3:
+            s_rate = np.polyfit(t[summer], d[summer], 1)[0] * 365.25 * 1000
+            w_rate = np.polyfit(t[winter], d[winter], 1)[0] * 365.25 * 1000
+            f["inter_seasonal_rate_contrast"] = float(abs(s_rate - w_rate))
+        else:
+            f["inter_seasonal_rate_contrast"] = 0.0
+    else:
+        f["inter_seasonal_rate_contrast"] = 0.0
+
+    # Data completeness: low for regions with persistent cloud/vegetation cover
+    f["num_valid_obs"] = int(num_valid_obs) if num_valid_obs is not None else len(d)
 
     return f
 
@@ -729,6 +836,7 @@ def build_features(
     slope=None,
     aspect_sin=None,
     aspect_cos=None,
+    elevation=None,
 ):
     """Assembles temporal, spatial, and terrain features into a DataFrame.
 
@@ -741,7 +849,12 @@ def build_features(
     print(f"  Computing features for {len(valid_pixels)} pixels...")
     rows = []
     for i, px in enumerate(valid_pixels):
-        tf = compute_temporal_features(px["time_series"], px["t_days"])
+        tf = compute_temporal_features(
+            px["time_series"],
+            px["t_days"],
+            doy=px.get("doy"),
+            num_valid_obs=px.get("num_valid_obs"),
+        )
         if tf is None:
             continue
         sf = compute_spatial_features(
@@ -761,6 +874,8 @@ def build_features(
             row["slope_deg"] = float(slope[px["y"], px["x"]])
             row["aspect_sin"] = float(aspect_sin[px["y"], px["x"]])
             row["aspect_cos"] = float(aspect_cos[px["y"], px["x"]])
+            if elevation is not None:
+                row["elevation_m"] = float(elevation[px["y"], px["x"]])
 
         rows.append(row)
         if (i + 1) % 500 == 0:
@@ -786,16 +901,32 @@ def save_outputs(df, valid_pixels, label, region_name):
     print(f"  Saved: {csv_path} ({len(df)} rows)")
 
     if valid_pixels:
-        ts_array = np.array([p["time_series"] for p in valid_pixels])
-        npz_path = out_dir / f"timeseries_{region_name}.npz"
-        np.savez(
-            npz_path,
-            time_series=ts_array,
-            labels=np.array([label] * len(valid_pixels)),
-            regions=np.array([region_name] * len(valid_pixels)),
-            t_days=valid_pixels[0]["t_days"],
-        )
-        print(f"  Saved: {npz_path} (shape {ts_array.shape})")
+        # Align NPZ rows with CSV rows by pixel coordinate.
+        # build_features may have skipped pixels (<10 timesteps) or a post-feature
+        # label filter may have dropped rows, so we cannot assume row order matches.
+        csv_coords = list(zip(df["pixel_y"].astype(int), df["pixel_x"].astype(int)))
+        coord_to_px = {(int(p["y"]), int(p["x"])): p for p in valid_pixels}
+        ordered = [coord_to_px[c] for c in csv_coords if c in coord_to_px]
+
+        if len(ordered) != len(df):
+            print(
+                f"  WARNING: {len(df) - len(ordered)} CSV rows have no matching "
+                f"time series — those pixels will have NaN time series in the NPZ."
+            )
+
+        if ordered:
+            ts_array = np.array([p["time_series"] for p in ordered])
+            npz_path = out_dir / f"timeseries_{region_name}.npz"
+            np.savez(
+                npz_path,
+                time_series=ts_array,
+                pixel_y=np.array([p["y"] for p in ordered], dtype=np.int32),
+                pixel_x=np.array([p["x"] for p in ordered], dtype=np.int32),
+                labels=np.array([label] * len(ordered)),
+                regions=np.array([region_name] * len(ordered)),
+                t_days=ordered[0]["t_days"],
+            )
+            print(f"  Saved: {npz_path} (shape {ts_array.shape}, aligned with CSV)")
 
 
 def process_frame(frame_id, file_list, info, region_name, max_samples):
@@ -804,16 +935,24 @@ def process_frame(frame_id, file_list, info, region_name, max_samples):
     Steps:
       1. Load all granules and read reference epoch metadata
       2. Crop to region bbox (reduces memory from ~30 GB to <1 GB)
-      3. Build displacement cube with cross-epoch stitching
-      4. Load and crop DEM, compute terrain features
-      5. Apply spatial filter (shapefile or bbox) then rate filter
-      6. Extract time series, compute features, return DataFrame
+      3. Average coherence over the last 5 acquisitions (more stable than single file)
+      4. Build displacement cube with cross-epoch stitching
+      5. Load and crop DEM, compute terrain + elevation features
+      6. Spatial filter (shapefile or bbox)
+      7. Rate filter — thresholds vary by class:
+           stable:     |rate| <= 2 mm/yr
+           subsidence: rate   <= -10 mm/yr
+           tectonic:   |rate| >= 3 mm/yr  (active creep only)
+           landslide:  |rate| >= 5 mm/yr  (active motion only)
+      8. Extract time series, compute features
+      9. Post-feature residual filter for landslide (removes stabilised slides)
+     10. Align valid_pixels list with surviving CSV rows before return
 
     Returns:
         tuple: (DataFrame, list of pixel dicts) or (None, []) if no data survives.
     """
     print(f"\n  --- Frame {frame_id} ({len(file_list)} files) ---")
-    dates, datasets, ref_dates = load_frame_datasets(file_list)
+    dates, datasets, ref_dates, file_paths = load_frame_datasets(file_list)
 
     try:
         slices = get_bbox_slices(datasets[0], info["bbox"])
@@ -825,13 +964,33 @@ def process_frame(frame_id, file_list, info, region_name, max_samples):
         x_utm = datasets[0].x.values[col_slice]
         y_utm = datasets[0].y.values[row_slice]
 
-        good_mask, coherence = get_quality_mask(datasets[-1], row_slice, col_slice)
+        # Average coherence over the last 5 acquisitions — much less noisy than
+        # using a single file, which can have one-off atmospheric/seasonal drops.
+        # Use h5py hyperslab reads to avoid loading full frames.
+        n_coh = min(5, len(file_paths))
+        coh_slices = []
+        for path in file_paths[-n_coh:]:
+            with h5py.File(path, "r") as hf:
+                var = hf["temporal_coherence"]
+                if var.ndim == 3:
+                    coh_slices.append(var[0, row_slice, col_slice].astype(np.float32))
+                else:
+                    coh_slices.append(var[row_slice, col_slice].astype(np.float32))
+        coh_stack = np.array(coh_slices, dtype=np.float32)
+        avg_coherence = np.nanmean(coh_stack, axis=0)
+        print(f"  Coherence averaged over last {n_coh} acquisitions")
+
+        good_mask, coherence = get_quality_mask(
+            datasets[-1], row_slice, col_slice, coherence_override=avg_coherence
+        )
 
         label = info["label"]
-        spacing = 90 if label == "landslide" else 500
+        # 150m spacing for landslides reduces spatial autocorrelation between
+        # adjacent training samples (previously 90m = 3px, heavily correlated).
+        spacing = 150 if label == "landslide" else 500
         y_coords, x_coords = sample_pixels(good_mask, min_spacing_m=spacing)
 
-        cube = build_displacement_cube(datasets, dates, ref_dates, row_slice, col_slice)
+        cube = build_displacement_cube(file_paths, dates, ref_dates, row_slice, col_slice)
 
         dem_path = PROJECT_ROOT / "data" / "dem" / f"dem_{frame_id}.tif"
         if dem_path.exists():
@@ -840,33 +999,24 @@ def process_frame(frame_id, file_list, info, region_name, max_samples):
             slope, aspect_sin, aspect_cos = compute_terrain(elevation)
         else:
             print(f"  WARNING: No DEM at {dem_path}, terrain features will be 0")
-            slope = np.zeros(cube.shape[1:], dtype=np.float32)
-            aspect_sin = np.zeros_like(slope)
-            aspect_cos = np.zeros_like(slope)
+            elevation = np.zeros(cube.shape[1:], dtype=np.float32)
+            slope = np.zeros_like(elevation)
+            aspect_sin = np.zeros_like(elevation)
+            aspect_cos = np.zeros_like(elevation)
 
         t_days = np.array([(d - dates[0]).days for d in dates], dtype=float)
 
-        # Step 1: Spatial filter
+        # --- Spatial filter ---
         if info.get("shapefile"):
             y_coords, x_coords = filter_by_shapefile(
-                y_coords,
-                x_coords,
-                datasets[0],
-                info,
-                x_utm=x_utm,
-                y_utm=y_utm,
+                y_coords, x_coords, datasets[0], info, x_utm=x_utm, y_utm=y_utm,
             )
         else:
             y_coords, x_coords = filter_by_bbox(
-                y_coords,
-                x_coords,
-                datasets[0],
-                info["bbox"],
-                x_utm=x_utm,
-                y_utm=y_utm,
+                y_coords, x_coords, datasets[0], info["bbox"], x_utm=x_utm, y_utm=y_utm,
             )
 
-        # Step 2: Rate filter
+        # --- Rate filter (class-specific thresholds) ---
         if label == "stable":
             y_coords, x_coords = filter_by_rate(
                 y_coords, x_coords, cube, t_days, "stable", 2.0
@@ -874,6 +1024,18 @@ def process_frame(frame_id, file_list, info, region_name, max_samples):
         elif label == "subsidence":
             y_coords, x_coords = filter_by_rate(
                 y_coords, x_coords, cube, t_days, "subsidence", 10.0
+            )
+        elif label == "tectonic":
+            # Require measurable creep — removes locked-fault quiet pixels that
+            # create multi-modal label noise in the tectonic class.
+            y_coords, x_coords = filter_by_rate(
+                y_coords, x_coords, cube, t_days, "tectonic", 3.0
+            )
+        elif label == "landslide":
+            # Require active motion — the USGS inventory is historic; most entries
+            # are stabilised slides that look identical to stable ground in InSAR.
+            y_coords, x_coords = filter_by_rate(
+                y_coords, x_coords, cube, t_days, "landslide", 5.0
             )
 
         if len(y_coords) == 0:
@@ -903,7 +1065,27 @@ def process_frame(frame_id, file_list, info, region_name, max_samples):
             slope=slope,
             aspect_sin=aspect_sin,
             aspect_cos=aspect_cos,
+            elevation=elevation,
         )
+
+        # --- Post-feature residual filter for landslide ---
+        # Rate filter passes pixels moving >= 5 mm/yr, but some may be marginal.
+        # Keeping pixels with high residual scatter (irregular episodic motion)
+        # OR confirmed high rate gives a cleaner active-landslide label.
+        if label == "landslide" and len(df) > 0 and "residual_std_mm" in df.columns:
+            before = len(df)
+            active = (df["residual_std_mm"] >= 3.0) | (df["linear_rate_mm_yr"].abs() >= 5.0)
+            df = df[active].reset_index(drop=True)
+            removed = before - len(df)
+            if removed:
+                print(f"  Landslide residual filter: removed {removed} marginal pixels "
+                      f"({len(df)} remain)")
+
+        # --- Align valid_pixels with surviving df rows ---
+        # Must happen before returning so save_outputs gets a consistent pair.
+        surviving = set(zip(df["pixel_y"].astype(int), df["pixel_x"].astype(int)))
+        valid_pixels = [p for p in valid_pixels if (int(p["y"]), int(p["x"])) in surviving]
+
         return df, valid_pixels
 
     finally:

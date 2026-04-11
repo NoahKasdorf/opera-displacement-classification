@@ -3,6 +3,7 @@
 import earthaccess
 from dotenv import load_dotenv
 import argparse
+from datetime import date
 
 from config import PROJECT_ROOT, REGIONS
 
@@ -18,18 +19,19 @@ TARGET_FRAMES = {
     "phoenix": "05126",
     "st_helens": "03322",
     
+    
     "stable_kansas": "08889",
     "stable_texas": "28482",
     "stable_sierra": "16942",
 }
 
 
-def download_region(region_name, max_files=100):
-    """Downloads up to max_files OPERA DISP-S1 granules for a given region.
+def download_region(region_name, max_files=None):
+    """Downloads OPERA DISP-S1 granules for a given region.
 
     Args:
         region_name (str): The name of the region defined in config.py.
-        max_files (int, optional): Maximum number of granules to fetch. Defaults to 100.
+        max_files (int, optional): Cap on granules fetched. None = full archive.
     """
     info = REGIONS.get(region_name)
     frame_id = TARGET_FRAMES.get(region_name)
@@ -45,19 +47,20 @@ def download_region(region_name, max_files=100):
     out_dir = PROJECT_ROOT / "data" / region_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Targeting {region_name} | Frame: {frame_id} | Goal: {max_files} files")
+    goal = f"{max_files} files" if max_files else "full archive"
+    print(f"Targeting {region_name} | Frame: {frame_id} | Goal: {goal}")
 
     bbox = info["bbox"]
-    print(f"Searching OPERA DISP-S1 for {region_name} | bbox={bbox}")
 
+    # The frame_id filter already uniquely identifies the geographic tile —
+    # bounding_box would be redundant. count=-1 fetches the full archive.
+    # max_files is kept as a CLI override for quick test runs (--max-files 20).
+    count = max_files if max_files else -1
     results = earthaccess.search_data(
         short_name="OPERA_L3_DISP-S1_V1",
-        bounding_box=bbox,
-        granule_name= f"*_F{frame_id}_*",
-        temporal=("2016-07-01", "2026-03-17"),
-        #temporal=("2022-01-01", "2026-06-01"),
-        count=max_files,
-        sort_key="-start_date",
+        granule_name=f"*_F{frame_id}_*",
+        temporal=("2014-01-01", date.today().isoformat()),
+        count=count,
     )
     print(f"Found {len(results)} granules.")
 
@@ -81,7 +84,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download OPERA DISP-S1 data")
     parser.add_argument("--region", type=str, help="Single region to download")
     parser.add_argument("--all", action="store_true", help="Download all regions")
-    parser.add_argument("--max-files", type=int, default=100)
+    parser.add_argument("--max-files", type=int, default=None)
     args = parser.parse_args()
 
     if args.all:
