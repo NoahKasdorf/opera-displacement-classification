@@ -1,8 +1,61 @@
-"""Shared configuration for OPERA DISP-S1 pipeline."""
+"""Shared configuration for the OPERA DISP-S1 classification pipeline"""
 
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+PROJECT_ROOT  = Path(__file__).resolve().parent.parent
+PROCESSED_DIR = PROJECT_ROOT / "processed"
+RESULTS_DIR   = PROJECT_ROOT / "results"
+MODELS_DIR    = PROJECT_ROOT / "models"
+FIGURES_DIR   = PROJECT_ROOT / "figures"
+
+
+PREDICTIONS_NPZ = RESULTS_DIR / "predictions.npz"
+
+
+META_COLS = ["pixel_y", "pixel_x", "frame_id", "region", "label"]
+
+
+TEMPORAL_KEYWORDS = [
+    "rate", "vel", "amplitude", "seasonal", "trend",
+    "acceleration", "curvature", "disp", "cumulative",
+    "r_squared", "residual", "autocorr", "r2_ratio",
+    "monoton", "num_valid", "kurtosis", "skewness",
+]
+
+
+SPATIAL_PREFIXES = ("nbr_", "spatial_")
+
+
+RANDOM_SEED = 42
+TEST_SIZE   = 0.2
+
+
+HOLDOUT_REGIONS = {
+    "tectonic"  : "san_andreas",       
+    "subsidence": "san_joaquin",       
+    "stable"    : "stable_texas",      
+    "landslide" : "california_north",  
+}
+
+
+CNN_SEQ_LEN         = 100
+CNN_EPOCHS          = 60
+CNN_BATCH_SIZE      = 64
+CNN_VAL_SPLIT       = 0.15   # fraction of training data held out for early stopping
+EARLY_STOP_PATIENCE = 10
+
+
+LABEL_COLORS = {
+    "tectonic"  : "#e6194b",
+    "landslide" : "#3cb44b",
+    "subsidence": "#4363d8",
+    "stable"    : "#f58231",
+}
+PLOT_STYLE = "seaborn-v0_8-whitegrid"
+TITLE_FONT = {"fontsize": 13, "fontweight": "bold"}
+DPI        = 150
+
 
 REGIONS = {
     # --- Tectonic ---
@@ -52,7 +105,6 @@ REGIONS = {
     # --- Subsidence ---
     "san_joaquin": {
         "label": "subsidence",
-        # "bbox": (-120.8, 35.5, -119.5, 36.5),
         "bbox": (-120.3, 35.5, -119.5, 36.5),
         "shapefile": None,
         "shapefile_filter": None,
@@ -72,32 +124,9 @@ REGIONS = {
         "shapefile_filter": None,
         "buffer_m": None,
     },
-    # --- Volcanic ---
-    # "long_valley": {
-    #     "label": "volcanic",
-    #     "bbox": (-119.2, 37.5, -118.5, 37.9),
-    #     "shapefile": None,
-    #     "shapefile_filter": None,
-    #     "buffer_m": None,
-    # },
-    # "yellowstone": {
-    #     "label": "volcanic",
-    #     "bbox": (-111.0, 44.3, -110.2, 44.8),
-    #     "shapefile": None,
-    #     "shapefile_filter": None,
-    #     "buffer_m": None,
-    # },
-    # "st_helens": {
-    #     "label": "volcanic",
-    #     "bbox": (-122.5, 46.0, -121.8, 46.4),
-    #     "shapefile": None,
-    #     "shapefile_filter": None,
-    #     "buffer_m": None,
-    # },
     # --- Stable ---
     "stable_sierra": {
         "label": "stable",
-        # "bbox": (-119.5, 37.0, -118.8, 37.5),
         "bbox": (-119.5, 37.0, -118.8, 37.4),
         "shapefile": None,
         "shapefile_filter": None,
