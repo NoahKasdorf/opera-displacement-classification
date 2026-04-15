@@ -18,6 +18,7 @@ Outputs:
 # Keras backend must be set before importing keras.
 # TF is broken with NumPy 2.x, so we force the PyTorch backend.
 import os
+
 os.environ["KERAS_BACKEND"] = "torch"
 
 # Windows terminals default to CP-1252 which chokes on Unicode print statements.
@@ -29,10 +30,12 @@ import numpy as np
 import pandas as pd
 import joblib
 from pathlib import Path
-from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedShuffleSplit, GridSearchCV
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, classification_report
+from sklearn.decomposition import PCA
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.utils.class_weight import compute_sample_weight
 import xgboost as xgb
 import keras
@@ -43,9 +46,10 @@ from config import (
     RANDOM_SEED, TEST_SIZE, HOLDOUT_REGIONS,
     CNN_SEQ_LEN, CNN_EPOCHS, CNN_BATCH_SIZE, CNN_VAL_SPLIT, EARLY_STOP_PATIENCE,
 )
+from sklearn.pipeline import Pipeline
 
-RUN_XGB = False   
-RUN_KNN = False   
+RUN_XGB = True
+RUN_KNN = True
 
 # Reproducibility
 np.random.seed(RANDOM_SEED)
@@ -318,8 +322,7 @@ def train_xgb_ablation(
     X_train: np.ndarray, y_train: np.ndarray,
     X_test: np.ndarray,  y_test: np.ndarray,
     temporal_cols: list[str], spatial_cols: list[str],
-    all_feat_cols: list[str], label_classes: np.ndarray,
-) -> dict:
+    all_feat_cols: list[str], label_classes: np.ndarray) -> dict:
     """Trains XGBoost three times: temporal-only, spatial-only, and all features.
 
     Use compute_sample_weight('balanced') for class imbalance.
@@ -330,36 +333,43 @@ def train_xgb_ablation(
         "xgb_feature_names": array of str.
         "xgb_feature_importance": array of float (model.feature_importances_).
     """
-    # TODO: implement XGBoost ablation. Suggested starting point:
-    #
-    #   col_idx_map = {c: i for i, c in enumerate(all_feat_cols)}
-    #   t_idx = [col_idx_map[c] for c in temporal_cols]
-    #   s_idx = [col_idx_map[c] for c in spatial_cols]
-    #
-    #   xgb_params = dict(n_estimators=300, max_depth=5, learning_rate=0.05,
-    #                     subsample=0.8, colsample_bytree=0.8,
-    #                     eval_metric="mlogloss", random_state=RANDOM_SEED,
-    #                     tree_method="hist", verbosity=0)
-    #
-    #   for run_name, col_indices in [("temporal", t_idx), ("spatial", s_idx),
-    #                                  ("all", list(range(len(all_feat_cols))))]:
-    #       X_tr = X_train[:, col_indices]
-    #       X_te = X_test[:,  col_indices]
-    #       sw   = compute_sample_weight("balanced", y_train)
-    #       clf  = xgb.XGBClassifier(**xgb_params)
-    #       clf.fit(X_tr, y_train, sample_weight=sw)
-    #       preds = clf.predict(X_te)
-    #       ...
-    #
-    # Once done, flip RUN_XGB = True at the top of this file.
-    raise NotImplementedError("XGBoost ablation not yet implemented")
+    results = {}
+    col_idx_map = {c: i for i, c in enumerate(all_feat_cols)}
+    t_idx = [col_idx_map[c] for c in temporal_cols]
+    s_idx = [col_idx_map[c] for c in spatial_cols]
+
+    sw = compute_sample_weight("balanced", y_train)
+
+    for run_name, col_indices in [("temporal", t_idx), ("spatial", s_idx),
+                                      ("all", list(range(len(all_feat_cols))))]:
+          X_tr = X_train[:, col_indices]
+          X_te = X_test[:,  col_indices]
+          clf  = xgb.XGBClassifier(n_estimators=500, max_depth=4, learning_rate=0.01, objective="multi:softprob",
+                                   subsample=0.8, colsample_bytree=0.8, eval_metric="mlogloss",
+                                   random_state=RANDOM_SEED, tree_method="hist")
+          clf.fit(X_tr, y_train, sample_weight=sw)
+          preds = clf.predict(X_te)
+          results[run_name] = {
+              "model": clf,
+              "preds": preds,
+              "acc": accuracy_score(y_test, preds),
+              "f1": f1_score(y_test, preds, average="macro"),
+          }
+
+          if run_name == "all":
+              results["xgb_feature_names"] = np.array(all_feat_cols)
+              results["xgb_feature_importance"] = clf.feature_importances_
+
+          print(run_name)
+          print(classification_report(y_test, preds, target_names=label_classes))
+
+
+    return results
 
 
 def train_knn_pca(
     X_train: np.ndarray, y_train: np.ndarray,
-    X_test: np.ndarray,  y_test: np.ndarray,
-    label_classes: np.ndarray,
-) -> dict:
+    X_test: np.ndarray,  y_test: np.ndarray, label_classes: np.ndarray) -> dict:
     """KNN classifier on PCA-reduced features.
 
     Expects the full scaled feature matrix (same as LR). The caller should
@@ -371,28 +381,42 @@ def train_knn_pca(
     Suggested: use n_components to capture ~95% variance, try n_neighbors in
     [5, 11, 21], and weights='distance' to handle class imbalance.
     """
-    # TODO: implement KNN + PCA. Suggested starting point:
-    #
-    #   from sklearn.decomposition import PCA
-    #   from sklearn.neighbors import KNeighborsClassifier
-    #
-    #   scaler  = StandardScaler()
-    #   X_tr_sc = scaler.fit_transform(X_train)
-    #   X_te_sc = scaler.transform(X_test)
-    #
-    #   pca = PCA(n_components=0.95, random_state=RANDOM_SEED)  # keep 95% variance
-    #   X_tr_pca = pca.fit_transform(X_tr_sc)
-    #   X_te_pca = pca.transform(X_te_sc)
-    #   print(f"  PCA kept {pca.n_components_} components")
-    #
-    #   knn = KNeighborsClassifier(n_neighbors=11, metric="euclidean",
-    #                              weights="distance")
-    #   knn.fit(X_tr_pca, y_train)
-    #   preds = knn.predict(X_te_pca)
-    #   ...
-    #
-    # Once done, flip RUN_KNN = True at the top of this file.
-    raise NotImplementedError("KNN+PCA not yet implemented")
+
+    # define model
+    model = Pipeline([
+        ("scaler", StandardScaler()),
+        ("pca", PCA(n_components=0.95, random_state=RANDOM_SEED)),
+        ("knn", KNeighborsClassifier(metric="euclidean", weights="distance")),
+    ])
+
+    # Cross-validate to find optimal n_neighbours
+    params = {'knn__n_neighbors': [5, 7, 9, 11, 15, 21]}
+    cv = GridSearchCV(model, params, scoring='f1_macro', cv=10)
+    cv.fit(X_train, y_train)
+    best_model = cv.best_estimator_ # cv.fit trained the model with the best n_neighbours
+
+    # variables
+    pca_components = best_model.named_steps['pca'].n_components_
+    preds = best_model.predict(X_test)
+    pre_knn = best_model[:-1] # grabs the model prior to running knn. used for pca_embeddings in results
+
+    print(f"  PCA kept {pca_components} components")
+    print(f" KNN using {cv.best_params_['knn__n_neighbors']} neighbours")
+
+    results = {
+        "preds": preds,
+        "acc": accuracy_score(y_test, preds),
+        "f1": f1_score(y_test, preds, average="macro"),
+        "pca_embeddings_test": pre_knn.transform(X_test),
+        "pca_embeddings_train": pre_knn.transform(X_train),
+        "model": best_model.named_steps["knn"], # i think this is right? can just return best_model otherwise
+        "pca": best_model.named_steps["pca"],
+        "n_components": pca_components
+    }
+
+    print(classification_report(y_test, preds, target_names=label_classes))
+
+    return results
 
 
 def train_regional_evaluation(
