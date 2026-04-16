@@ -15,14 +15,28 @@ TARGET_FRAMES = {
     "san_joaquin": "11116",
     "houston": "38238",
     "california_north": "09158",
-    "wasatch": "05131",
     "phoenix": "05126",
-    "st_helens": "03322",
-    
-    
     "stable_kansas": "08889",
     "stable_texas": "28482",
     "stable_sierra": "16942",
+    "garlock": "16941",
+    "imperial": "46291",
+    "san_jacinto": "46290",
+    "slumgullion": "40302",
+    "grand_mesa": "14873",
+    "oso_washington": "16951",
+    "las_vegas": "46288",
+    "permian_basin": "20697",
+    "stockton_delta": "09156",
+    "tucson": "05125",
+    "stable_nebraska": "08891",
+    "stable_iowa": "16677",
+    "stable_wyoming": "40305",
+    "stable_colorado": "01103",
+    "owens_valley": "16942",
+    "portuguese_bend": "16940",
+    "la_conchita": "38504",
+    "thistle_utah": "05131",
 }
 
 
