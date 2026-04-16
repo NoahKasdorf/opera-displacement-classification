@@ -1016,6 +1016,10 @@ def process_frame(frame_id, file_list, info, region_name, max_samples):
                 y_coords, x_coords, datasets[0], info["bbox"], x_utm=x_utm, y_utm=y_utm,
             )
 
+        if len(y_coords) == 0:
+            print(f"  No pixels remain after spatial filtering — skipping frame.")
+            return None, []
+
         # --- Rate filter (class-specific thresholds) ---
         if label == "stable":
             y_coords, x_coords = filter_by_rate(

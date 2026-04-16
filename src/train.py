@@ -51,7 +51,7 @@ from sklearn.pipeline import Pipeline
 RUN_XGB = True
 RUN_KNN = True
 
-# Reproducibility
+
 np.random.seed(RANDOM_SEED)
 try:
     # keras.utils.set_random_seed covers all backends, but also touches TF.
@@ -372,14 +372,10 @@ def train_knn_pca(
     X_test: np.ndarray,  y_test: np.ndarray, label_classes: np.ndarray) -> dict:
     """KNN classifier on PCA-reduced features.
 
-    Expects the full scaled feature matrix (same as LR). The caller should
-    scale X_train and X_test before passing in.
+    Expects the full scaled feature matrix 
 
     Returns a dict with keys: preds, acc, f1, pca_embeddings_test,
     pca_embeddings_train, model, pca, n_components.
-
-    Suggested: use n_components to capture ~95% variance, try n_neighbors in
-    [5, 11, 21], and weights='distance' to handle class imbalance.
     """
 
     # define model
