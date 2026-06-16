@@ -49,4 +49,4 @@ log "Visualizing..."
 python src/visualize.py
 
 echo ""
-echo "Pipeline complete."
+echo "Pipeline complete"
